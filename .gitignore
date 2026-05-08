@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build and packaging
+build/
+dist/
+*.egg-info/
+
+# Test and tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Data and generated outputs
+data/
+outputs/
+*.png
+*.jpg
+*.jpeg
+*.pdf
+*.npy
+*.npz
+*.pt
+*.pth
+
+# Local editor and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
