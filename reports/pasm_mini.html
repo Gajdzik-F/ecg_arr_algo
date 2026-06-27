@@ -1,0 +1,976 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mini PASM-Rhythm Report</title>
+<style>
+
+:root {
+  color-scheme: light;
+  --bg: #f5f7f8;
+  --surface: #ffffff;
+  --surface-2: #eef3f4;
+  --text: #152023;
+  --muted: #5f6d72;
+  --line: #d7e0e3;
+  --accent: #0f766e;
+  --accent-2: #b45309;
+  --good: #0b6b43;
+  --shadow: 0 14px 40px rgba(21, 32, 35, 0.08);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  line-height: 1.5;
+}
+
+.shell {
+  width: min(1240px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 28px 0 48px;
+}
+
+.topbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 20px;
+  align-items: end;
+  padding: 24px 0 20px;
+}
+
+.label {
+  margin: 0 0 6px;
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(2rem, 4vw, 3.4rem);
+  line-height: 1.02;
+  font-weight: 850;
+  letter-spacing: 0;
+}
+
+.lede {
+  max-width: 680px;
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 1rem;
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  max-width: 480px;
+}
+
+.meta span,
+.link {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 0 12px;
+  color: var(--muted);
+  font-size: 0.86rem;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.link {
+  color: var(--accent);
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+  margin: 18px 0 18px;
+}
+
+.metric,
+.panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.metric {
+  min-height: 118px;
+  padding: 18px;
+}
+
+.metric-label {
+  min-height: 34px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 750;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+.metric-value {
+  margin-top: 12px;
+  font-size: 2.15rem;
+  line-height: 1;
+  font-weight: 850;
+  font-variant-numeric: tabular-nums;
+}
+
+.panel {
+  margin-top: 16px;
+  overflow: hidden;
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+  padding: 14px 18px;
+}
+
+h2 {
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1.2;
+  font-weight: 850;
+  letter-spacing: 0;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+th,
+td {
+  border-bottom: 1px solid var(--line);
+  padding: 11px 12px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+th {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 850;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+tbody tr:hover {
+  background: #f8fbfb;
+}
+
+td.score {
+  color: var(--good);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+td.warn {
+  color: var(--accent-2);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+td.status-tp {
+  color: var(--good);
+  font-weight: 850;
+}
+
+td.status-fp {
+  color: var(--accent-2);
+  font-weight: 850;
+}
+
+td.status-fn {
+  color: #9f1239;
+  font-weight: 850;
+}
+
+.timeline {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+}
+
+.lane {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+}
+
+.lane-label {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.lane-track {
+  position: relative;
+  height: 26px;
+  overflow: hidden;
+  border-radius: 8px;
+  background: #dfe7e9;
+}
+
+.tick {
+  position: absolute;
+  top: 5px;
+  height: 16px;
+  border-radius: 6px;
+}
+
+.tick.truth {
+  background: #0f766e;
+}
+
+.tick.pred {
+  background: #b45309;
+}
+
+.bar {
+  display: block;
+  width: 160px;
+  height: 9px;
+  overflow: hidden;
+  border-radius: 8px;
+  background: #dfe7e9;
+}
+
+.bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), #22a398);
+}
+
+.empty,
+.notes {
+  margin: 0;
+  padding: 18px;
+  color: var(--muted);
+}
+
+.notes {
+  padding-left: 38px;
+}
+
+.notes li + li {
+  margin-top: 8px;
+}
+
+@media (max-width: 920px) {
+  .topbar {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+
+  .meta {
+    justify-content: flex-start;
+  }
+
+  .summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .shell {
+    width: min(100% - 20px, 1240px);
+    padding-top: 14px;
+  }
+
+  h1 {
+    font-size: 2rem;
+  }
+
+  .summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .metric {
+    min-height: 98px;
+  }
+}
+
+</style>
+</head>
+<body>
+<main class="shell">
+
+<header class="topbar">
+  <div>
+    <p class="label">PASM-Rhythm Validation</p>
+    <h1>Real-Data Report: mini</h1>
+    <p class="lede">WFDB/PhysioNet checkpoint report for arrhythmia episode detection.</p>
+  </div>
+  <div class="meta">
+    <span>2026-06-27 16:38:06</span>
+    <span>10 records</span>
+    <span>7 with truth</span>
+    <a class="link" href="../PASM_REALDATA_SUMMARY.md">Markdown</a>
+  </div>
+</header>
+
+<section class="summary-grid" aria-label="Summary metrics">
+
+<article class="metric">
+  <div class="metric-label">Episode F1</div>
+  <div class="metric-value">0.710</div>
+</article>
+
+
+<article class="metric">
+  <div class="metric-label">Precision</div>
+  <div class="metric-value">0.786</div>
+</article>
+
+
+<article class="metric">
+  <div class="metric-label">Recall</div>
+  <div class="metric-value">0.667</div>
+</article>
+
+
+<article class="metric">
+  <div class="metric-label">False Alarms / Hour</div>
+  <div class="metric-value">5.143</div>
+</article>
+
+
+<article class="metric">
+  <div class="metric-label">Typed F1</div>
+  <div class="metric-value">0.942</div>
+</article>
+
+</section>
+
+<section class="panel">
+  <div class="section-head">
+    <h2>Evidence Layer</h2>
+  </div>
+  <div class="table-wrap"><table>
+<thead><tr>
+<th>parameter</th>
+<th>value</th>
+</tr></thead><tbody>
+<tr>
+<td>AF merge gap</td>
+<td>45.0 s</td>
+</tr>
+<tr>
+<td>AF-adjacent tachy suppression margin</td>
+<td>10.0 s</td>
+</tr>
+<tr>
+<td>Minimum retained sinus tachy duration</td>
+<td>3.0 s</td>
+</tr>
+<tr>
+<td>Ectopy short RR</td>
+<td>0.50 s</td>
+</tr>
+<tr>
+<td>Ectopy relative RR fraction</td>
+<td>0.75</td>
+</tr>
+<tr>
+<td>Ectopy merge gap</td>
+<td>1.0 s</td>
+</tr>
+<tr>
+<td>Ectopy flood rate threshold</td>
+<td>30.0 / h</td>
+</tr>
+<tr>
+<td>Ectopy flood minimum confidence</td>
+<td>0.40</td>
+</tr>
+<tr>
+<td>Ectopy flood density window</td>
+<td>10.0 s</td>
+</tr>
+<tr>
+<td>Ectopy flood minimum density</td>
+<td>6</td>
+</tr>
+<tr>
+<td>Ectopy flood minimum candidates</td>
+<td>10</td>
+</tr>
+<tr>
+<td>Ectopy flood strong morph z</td>
+<td>0.55</td>
+</tr>
+<tr>
+<td>Ectopy flood dense morph z</td>
+<td>0.60</td>
+</tr>
+</tbody></table></div>
+</section>
+
+
+<section class="panel">
+  <div class="section-head">
+    <h2>Loaded Record Inventory</h2>
+  </div>
+  <div class="table-wrap"><table>
+<thead><tr>
+<th>record_id</th>
+<th>duration_s</th>
+<th>beats</th>
+<th>truth_episodes</th>
+<th>truth_duration_s</th>
+<th>truth_types</th>
+<th>truth_coverage</th>
+</tr></thead><tbody>
+<tr>
+<td>mitdb/200</td>
+<td>900.000</td>
+<td>1328</td>
+<td>2</td>
+<td>2.244</td>
+<td>ectopic_like</td>
+<td><span class="bar"><span style="width:0.25%"></span></span></td>
+</tr>
+<tr>
+<td>mitdb/201</td>
+<td>900.000</td>
+<td>1038</td>
+<td>1</td>
+<td>0.978</td>
+<td>ectopic_like</td>
+<td><span class="bar"><span style="width:0.11%"></span></span></td>
+</tr>
+<tr>
+<td>mitdb/203</td>
+<td>900.000</td>
+<td>1542</td>
+<td>12</td>
+<td>11.842</td>
+<td>ectopic_like</td>
+<td><span class="bar"><span style="width:1.32%"></span></span></td>
+</tr>
+<tr>
+<td>mitdb/205</td>
+<td>900.000</td>
+<td>1379</td>
+<td>2</td>
+<td>5.364</td>
+<td>ectopic_like</td>
+<td><span class="bar"><span style="width:0.60%"></span></span></td>
+</tr>
+<tr>
+<td>mitdb/208</td>
+<td>900.000</td>
+<td>1503</td>
+<td>0</td>
+<td>0.000</td>
+<td></td>
+<td><span class="bar"><span style="width:0.00%"></span></span></td>
+</tr>
+<tr>
+<td>afdb/04015</td>
+<td>1200.000</td>
+<td>1874</td>
+<td>3</td>
+<td>203.800</td>
+<td>af_like</td>
+<td><span class="bar"><span style="width:16.98%"></span></span></td>
+</tr>
+<tr>
+<td>afdb/04043</td>
+<td>1200.000</td>
+<td>2149</td>
+<td>1</td>
+<td>134.008</td>
+<td>af_like</td>
+<td><span class="bar"><span style="width:11.17%"></span></span></td>
+</tr>
+<tr>
+<td>afdb/04048</td>
+<td>1200.000</td>
+<td>1382</td>
+<td>0</td>
+<td>0.000</td>
+<td></td>
+<td><span class="bar"><span style="width:0.00%"></span></span></td>
+</tr>
+<tr>
+<td>afdb/04126</td>
+<td>1200.000</td>
+<td>2492</td>
+<td>3</td>
+<td>774.856</td>
+<td>af_like</td>
+<td><span class="bar"><span style="width:64.57%"></span></span></td>
+</tr>
+<tr>
+<td>afdb/04746</td>
+<td>1200.000</td>
+<td>1278</td>
+<td>0</td>
+<td>0.000</td>
+<td></td>
+<td><span class="bar"><span style="width:0.00%"></span></span></td>
+</tr>
+</tbody></table></div>
+</section>
+
+
+<section class="panel">
+  <div class="section-head">
+    <h2>Per-Record Episode Metrics</h2>
+  </div>
+  <div class="table-wrap"><table>
+<thead><tr>
+<th>record_id</th>
+<th>tp_macro</th>
+<th>fp_macro</th>
+<th>fn_macro</th>
+<th>precision_macro</th>
+<th>recall_macro</th>
+<th>f1_macro</th>
+<th>f1_false_alarms_per_hour</th>
+</tr></thead><tbody>
+<tr>
+<td>afdb/04015</td>
+<td>2</td>
+<td class="warn">0</td>
+<td class="warn">1</td>
+<td class="score">1.000</td>
+<td class="score">0.667</td>
+<td class="score">0.800</td>
+<td class="warn score">0.000</td>
+</tr>
+<tr>
+<td>afdb/04043</td>
+<td>1</td>
+<td class="warn">0</td>
+<td class="warn">0</td>
+<td class="score">1.000</td>
+<td class="score">1.000</td>
+<td class="score">1.000</td>
+<td class="warn score">0.000</td>
+</tr>
+<tr>
+<td>afdb/04126</td>
+<td>3</td>
+<td class="warn">0</td>
+<td class="warn">0</td>
+<td class="score">1.000</td>
+<td class="score">1.000</td>
+<td class="score">1.000</td>
+<td class="warn score">0.000</td>
+</tr>
+<tr>
+<td>mitdb/200</td>
+<td>1</td>
+<td class="warn">0</td>
+<td class="warn">1</td>
+<td class="score">1.000</td>
+<td class="score">0.500</td>
+<td class="score">0.667</td>
+<td class="warn score">0.000</td>
+</tr>
+<tr>
+<td>mitdb/201</td>
+<td>0</td>
+<td class="warn">3</td>
+<td class="warn">1</td>
+<td class="score">0.000</td>
+<td class="score">0.000</td>
+<td class="score">0.000</td>
+<td class="warn score">12.000</td>
+</tr>
+<tr>
+<td>mitdb/203</td>
+<td>6</td>
+<td class="warn">6</td>
+<td class="warn">6</td>
+<td class="score">0.500</td>
+<td class="score">0.500</td>
+<td class="score">0.500</td>
+<td class="warn score">24.000</td>
+</tr>
+<tr>
+<td>mitdb/205</td>
+<td>2</td>
+<td class="warn">0</td>
+<td class="warn">0</td>
+<td class="score">1.000</td>
+<td class="score">1.000</td>
+<td class="score">1.000</td>
+<td class="warn score">0.000</td>
+</tr>
+</tbody></table></div>
+</section>
+
+
+<section class="panel">
+  <div class="section-head">
+    <h2>Per-Record Type Metrics</h2>
+  </div>
+  <div class="table-wrap"><table>
+<thead><tr>
+<th>record_id</th>
+<th>type</th>
+<th>precision</th>
+<th>recall</th>
+<th>f1</th>
+<th>mean_iou</th>
+</tr></thead><tbody>
+<tr>
+<td>afdb/04015</td>
+<td>af_like</td>
+<td>1.000</td>
+<td>0.667</td>
+<td class="score">0.800</td>
+<td>0.823</td>
+</tr>
+<tr>
+<td>afdb/04015</td>
+<td>ectopic_like</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+<tr>
+<td>afdb/04015</td>
+<td>noise_uncertain</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+<tr>
+<td>afdb/04015</td>
+<td>sinus_brady</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+<tr>
+<td>afdb/04015</td>
+<td>sinus_tachy</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+<tr>
+<td>afdb/04043</td>
+<td>af_like</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td>0.941</td>
+</tr>
+<tr>
+<td>afdb/04043</td>
+<td>ectopic_like</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+<tr>
+<td>afdb/04043</td>
+<td>noise_uncertain</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+<tr>
+<td>afdb/04043</td>
+<td>sinus_brady</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+<tr>
+<td>afdb/04043</td>
+<td>sinus_tachy</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+<tr>
+<td>afdb/04126</td>
+<td>af_like</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td>0.924</td>
+</tr>
+<tr>
+<td>afdb/04126</td>
+<td>ectopic_like</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+<tr>
+<td>afdb/04126</td>
+<td>noise_uncertain</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+<tr>
+<td>afdb/04126</td>
+<td>sinus_brady</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+<tr>
+<td>afdb/04126</td>
+<td>sinus_tachy</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+<tr>
+<td>mitdb/200</td>
+<td>af_like</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+<tr>
+<td>mitdb/200</td>
+<td>ectopic_like</td>
+<td>1.000</td>
+<td>0.500</td>
+<td class="score">0.667</td>
+<td>1.000</td>
+</tr>
+<tr>
+<td>mitdb/200</td>
+<td>noise_uncertain</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+<tr>
+<td>mitdb/200</td>
+<td>sinus_brady</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+<tr>
+<td>mitdb/200</td>
+<td>sinus_tachy</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+<tr>
+<td>mitdb/201</td>
+<td>af_like</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+<tr>
+<td>mitdb/201</td>
+<td>ectopic_like</td>
+<td>0.000</td>
+<td>0.000</td>
+<td class="score">0.000</td>
+<td></td>
+</tr>
+<tr>
+<td>mitdb/201</td>
+<td>noise_uncertain</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+<tr>
+<td>mitdb/201</td>
+<td>sinus_brady</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+<tr>
+<td>mitdb/201</td>
+<td>sinus_tachy</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+<tr>
+<td>mitdb/203</td>
+<td>af_like</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+<tr>
+<td>mitdb/203</td>
+<td>ectopic_like</td>
+<td>0.500</td>
+<td>0.500</td>
+<td class="score">0.500</td>
+<td>0.818</td>
+</tr>
+<tr>
+<td>mitdb/203</td>
+<td>noise_uncertain</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+<tr>
+<td>mitdb/203</td>
+<td>sinus_brady</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+<tr>
+<td>mitdb/203</td>
+<td>sinus_tachy</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+<tr>
+<td>mitdb/205</td>
+<td>af_like</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+<tr>
+<td>mitdb/205</td>
+<td>ectopic_like</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td>0.800</td>
+</tr>
+<tr>
+<td>mitdb/205</td>
+<td>noise_uncertain</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+<tr>
+<td>mitdb/205</td>
+<td>sinus_brady</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+<tr>
+<td>mitdb/205</td>
+<td>sinus_tachy</td>
+<td>1.000</td>
+<td>1.000</td>
+<td class="score">1.000</td>
+<td></td>
+</tr>
+</tbody></table></div>
+</section>
+
+
+<section class="panel">
+  <div class="section-head">
+    <h2>Skipped Or Empty Records</h2>
+  </div>
+  <div class="table-wrap"><table>
+<thead><tr>
+<th>record_id</th>
+<th>reason</th>
+</tr></thead><tbody>
+<tr>
+<td>mitdb/208</td>
+<td>empty_truth</td>
+</tr>
+<tr>
+<td>afdb/04048</td>
+<td>empty_truth</td>
+</tr>
+<tr>
+<td>afdb/04746</td>
+<td>empty_truth</td>
+</tr>
+</tbody></table></div>
+</section>
+
+
+<section class="panel">
+  <div class="section-head">
+    <h2>Current Interpretation</h2>
+  </div>
+
+<ul class="notes">
+  <li>The preset exercises both AFDB rhythm annotations and MITDB short ectopic runs.</li>
+  <li>AFDB false alarms are much lower after PhysioNet evidence postprocessing; validate these parameters on a broader patient-wise split.</li>
+  <li>MITDB ectopy has stricter patient-relative short-RR evidence, but mitdb/203 remains the main false-alarm stress case.</li>
+  <li>This is still a research checkpoint; the next step is patient-wise train/holdout validation.</li>
+</ul>
+
+</section>
+
+</main>
+</body>
+</html>

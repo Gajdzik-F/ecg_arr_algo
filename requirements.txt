@@ -2,8 +2,4 @@ numpy
 scipy
 pandas
 matplotlib
-scikit-learn
-umap-learn
-hdbscan
-torch
-tqdm
+wfdb
