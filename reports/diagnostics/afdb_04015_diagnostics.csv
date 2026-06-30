@@ -1,0 +1,4 @@
+status,start_s,end_s,duration_s,type,confidence,beats,candidate_density,candidate_rate_per_hour,pattern,rr_support,pause_support,morph_support,density_support,mean_rr_prev,min_rr_prev,max_rr_prev,mean_rr_next,local_cv,local_rmssd,mean_morph_z,reason,context_rr_prev,context_rr_next,context_local_cv,context_local_rmssd,matched_truth_index,iou
+TP,417.2,491.02,73.82,af_like,0.4313826929072833,128.0,,,,,,,,,,,,,,,fast irregular rhythm window evidence,0.339999999999975,0.3760000000000332,0.19994942234259974,0.07936413967698353,0,0.758713003817362
+FN,487.092,488.776,1.684000000000026,af_like,,,,,,,,,,,,,,,,,,0.9200000000000159,0.5360000000000014,0.3279598226807561,0.28325096842044634,1,0.0
+TP,545.084,671.316,126.23200000000008,af_like,0.3463703112651797,245.0,,,,,,,,,,,,,,,fast irregular rhythm window evidence,0.4319999999999027,0.40800000000001546,0.13727508506300676,0.11597700921591483,2,0.8870392390011895

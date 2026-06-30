@@ -342,29 +342,72 @@ def detect_fast_irregular_af(features, win_beats=30, min_beats=25, merge_gap_s=1
     return pd.DataFrame(episodes)
 
 
-def detect_short_coupled_ectopy(
-    features,
-    short_rr_s=ECTOPY_SHORT_RR_S,
-    relative_rr_fraction=ECTOPY_RELATIVE_RR_FRACTION,
-    max_following_rr_s=1.05,
-    merge_gap_s=ECTOPY_MERGE_GAP_S,
-    beats=None,
-    patient_memory=None,
-    min_morph_z=None,
-    flood_rate_per_hour=ECTOPY_FLOOD_RATE_PER_HOUR,
-    flood_min_confidence=ECTOPY_FLOOD_MIN_CONFIDENCE,
-    flood_density_window_s=ECTOPY_FLOOD_DENSITY_WINDOW_S,
-    flood_min_density=ECTOPY_FLOOD_MIN_DENSITY,
-    flood_min_candidates=ECTOPY_FLOOD_MIN_CANDIDATES,
-):
-    """
-    Detect short runs of closely coupled ectopic-like beats.
+def _empty_ectopy_candidates():
+    return pd.DataFrame(
+        columns=[
+            "start_s",
+            "end_s",
+            "type",
+            "confidence",
+            "beats",
+            "mean_sqi",
+            "mean_rr_prev",
+            "min_rr_prev",
+            "max_rr_prev",
+            "mean_rr_next",
+            "local_cv",
+            "local_rmssd",
+            "mean_morph_z",
+            "max_post_pause_ratio",
+            "pattern",
+            "rr_support",
+            "pause_support",
+            "morph_support",
+            "density_support",
+            "short_coupled_confidence",
+            "candidate_density",
+            "candidate_rate_per_hour",
+            "flood_filtered",
+            "reason",
+        ]
+    )
 
-    This targets MITDB-style beat-level runs such as V-V-V, where the event is
-    too short for a rhythm-state decoder but still clinically meaningful.
-    """
+
+def _safe_nanmax(values, default=np.nan):
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    if len(values) == 0:
+        return default
+    return float(np.max(values))
+
+
+def _safe_nanmean(values, default=np.nan):
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    if len(values) == 0:
+        return default
+    return float(np.mean(values))
+
+
+def detect_ectopy_candidates(features, beats=None, patient_memory=None, config=None):
+    """Return raw MITDB-style ectopy candidates before flood filtering."""
+    config = dict(config or {})
+    short_rr_s = float(config.get("short_rr_s", ECTOPY_SHORT_RR_S))
+    relative_rr_fraction = float(config.get("relative_rr_fraction", ECTOPY_RELATIVE_RR_FRACTION))
+    max_following_rr_s = float(config.get("max_following_rr_s", 1.05))
+    min_morph_z = config.get("min_morph_z")
+    min_pause_ratio = float(config.get("min_pause_ratio", 1.25))
+    dense_morph_z = float(config.get("dense_morph_z", ECTOPY_FLOOD_DENSE_MORPH_Z))
+    dense_window_beats = int(config.get("dense_window_beats", 5))
+    dense_min_short = int(config.get("dense_min_short", 2))
+    burst_window_beats = int(config.get("burst_window_beats", 9))
+    burst_min_abnormal = int(config.get("burst_min_abnormal", 4))
+    burst_min_cv = float(config.get("burst_min_cv", 0.28))
+    burst_min_rmssd = float(config.get("burst_min_rmssd", 0.18))
+    burst_min_morph_z = float(config.get("burst_min_morph_z", 0.35))
+
     if len(features) < 3:
-        return pd.DataFrame(columns=["start_s", "end_s", "type", "confidence", "beats", "mean_sqi", "reason"])
+        return _empty_ectopy_candidates()
 
     rr_prev = features["rr_prev"].to_numpy(dtype=float)
     times = features["time_s"].to_numpy(dtype=float)
@@ -372,7 +415,13 @@ def detect_short_coupled_ectopy(
     reference_rr = short_rr_s / relative_rr_fraction
     if patient_memory is not None and np.isfinite(patient_memory.rr_median) and patient_memory.rr_median > 0:
         reference_rr = float(patient_memory.rr_median)
-    relative_short_rr_s = min(float(short_rr_s), float(reference_rr) * float(relative_rr_fraction))
+    relative_short_rr_s = min(float(short_rr_s), max(float(reference_rr) * float(relative_rr_fraction), 0.40))
+    rr_next = features["rr_next"].to_numpy(dtype=float) if "rr_next" in features else np.full(len(features), np.nan)
+    post_pause_ratio = (
+        features["post_pause_ratio"].to_numpy(dtype=float)
+        if "post_pause_ratio" in features
+        else rr_next / max(float(reference_rr), 1e-12)
+    )
 
     morph_z = np.zeros(len(features), dtype=float)
     has_morphology = (
@@ -389,7 +438,62 @@ def detect_short_coupled_ectopy(
         else:
             has_morphology = False
 
-    episodes = []
+    candidates = []
+
+    def add_candidate(start, end, pattern):
+        start = int(max(0, start))
+        end = int(min(len(features) - 1, end))
+        if end <= start:
+            return
+        seg = slice(start, end + 1)
+        rr_seg = rr_prev[seg]
+        rr_valid = rr_seg[np.isfinite(rr_seg) & (rr_seg > 0)]
+        if len(rr_valid) == 0:
+            return
+        mean_morph = float(np.nanmean(morph_z[seg])) if has_morphology else np.nan
+        rr_support = float(np.clip((relative_short_rr_s - np.nanmin(rr_valid)) / max(relative_short_rr_s, 1e-12), 0.0, 1.0))
+        short_coupled_confidence = rr_support
+        if pattern == "short_coupled_run" and start + 1 <= end:
+            short_coupled_confidence = float(
+                np.clip(
+                    ((relative_short_rr_s - rr_prev[start]) + (relative_short_rr_s - rr_prev[start + 1]))
+                    / max(relative_short_rr_s, 1e-12),
+                    0.0,
+                    1.0,
+                )
+            )
+        max_pause = _safe_nanmax(post_pause_ratio[seg])
+        pause_support = float(np.clip((max_pause - min_pause_ratio) / 0.45, 0.0, 1.0)) if np.isfinite(max_pause) else 0.0
+        morph_support = float(np.clip(mean_morph / max(dense_morph_z, 1e-12), 0.0, 1.0)) if has_morphology else 0.0
+        candidates.append(
+            {
+                "start_s": float(times[start]),
+                "end_s": float(times[end]),
+                "type": "ectopic_like",
+                "confidence": 0.0,
+                "beats": int(end - start + 1),
+                "mean_sqi": float(np.nanmean(sqi[seg])),
+                "mean_rr_prev": float(np.nanmean(rr_seg)),
+                "min_rr_prev": float(np.nanmin(rr_seg)),
+                "max_rr_prev": float(np.nanmax(rr_seg)),
+                "mean_rr_next": _safe_nanmean(rr_next[seg]),
+                "local_cv": float(np.nanmean(features["local_cv"].iloc[seg])) if "local_cv" in features else np.nan,
+                "local_rmssd": float(np.nanmean(features["local_rmssd"].iloc[seg])) if "local_rmssd" in features else np.nan,
+                "mean_morph_z": mean_morph,
+                "max_post_pause_ratio": max_pause,
+                "pattern": pattern,
+                "rr_support": rr_support,
+                "pause_support": pause_support,
+                "morph_support": morph_support,
+                "density_support": 0.0,
+                "short_coupled_confidence": short_coupled_confidence,
+                "candidate_density": 0,
+                "candidate_rate_per_hour": 0.0,
+                "flood_filtered": False,
+                "reason": f"{pattern} ectopic evidence",
+            }
+        )
+
     i = 1
     while i < len(features) - 2:
         two_short = rr_prev[i] <= relative_short_rr_s and rr_prev[i + 1] <= relative_short_rr_s
@@ -401,50 +505,139 @@ def detect_short_coupled_ectopy(
         )
         very_short_support = rr_prev[i] < 0.46 and rr_prev[i + 1] < 0.46
         if two_short and follows_without_long_pause and (morphology_support or very_short_support):
-            start = i
-            end = i + 2
-            confidence = float(
-                np.clip(
-                    ((relative_short_rr_s - rr_prev[i]) + (relative_short_rr_s - rr_prev[i + 1]))
-                    / max(relative_short_rr_s, 1e-12),
-                    0.0,
-                    1.0,
-                )
-            )
-            episodes.append(
-                {
-                    "start_s": float(times[start]),
-                    "end_s": float(times[end]),
-                    "type": "ectopic_like",
-                    "confidence": confidence,
-                    "beats": int(end - start + 1),
-                    "mean_sqi": float(np.nanmean(sqi[start : end + 1])),
-                    "mean_rr_prev": float(np.nanmean(rr_prev[start : end + 1])),
-                    "min_rr_prev": float(np.nanmin(rr_prev[start : end + 1])),
-                    "max_rr_prev": float(np.nanmax(rr_prev[start : end + 1])),
-                    "mean_rr_next": float(
-                        np.nanmean(features["rr_next"].to_numpy(dtype=float)[start : end + 1])
-                        if "rr_next" in features
-                        else np.nan
-                    ),
-                    "local_cv": float(np.nanmean(features["local_cv"].iloc[start : end + 1]))
-                    if "local_cv" in features
-                    else np.nan,
-                    "local_rmssd": float(np.nanmean(features["local_rmssd"].iloc[start : end + 1]))
-                    if "local_rmssd" in features
-                    else np.nan,
-                    "mean_morph_z": float(np.nanmean(morph_z[start : end + 1])) if has_morphology else np.nan,
-                    "flood_filtered": False,
-                    "reason": "short-coupled ectopic run evidence",
-                }
-            )
-            i = end + 1
+            add_candidate(i, i + 2, "short_coupled_run")
+            i = i + 3
         else:
+            single_short = np.isfinite(rr_prev[i]) and rr_prev[i] <= relative_short_rr_s
+            pause_supported = np.isfinite(post_pause_ratio[i]) and post_pause_ratio[i] >= min_pause_ratio
+            morph_supported = has_morphology and morph_z[i] >= 0.85
+            if single_short and (pause_supported or morph_supported):
+                add_candidate(i, min(i + 1, len(features) - 1), "premature_plus_pause")
             i += 1
-    episodes = pd.DataFrame(episodes)
+
+    if has_morphology:
+        short_flags = np.isfinite(rr_prev) & (rr_prev <= relative_short_rr_s)
+        morph_flags = morph_z >= dense_morph_z
+        for i in range(len(features)):
+            a = max(1, i - dense_window_beats // 2)
+            b = min(len(features) - 1, i + dense_window_beats // 2)
+            dense_mean_morph = float(np.nanmean(morph_z[a : b + 1]))
+            if (
+                np.sum(short_flags[a : b + 1]) >= dense_min_short
+                and np.sum(morph_flags[a : b + 1]) >= dense_min_short
+                and dense_mean_morph >= 0.75
+            ):
+                add_candidate(a, b, "morphology_cluster")
+
+    local_cv = features["local_cv"].fillna(0.0).to_numpy(dtype=float) if "local_cv" in features else np.zeros(len(features))
+    local_rmssd = (
+        features["local_rmssd"].fillna(0.0).to_numpy(dtype=float)
+        if "local_rmssd" in features
+        else np.zeros(len(features))
+    )
+    short_flags = np.isfinite(rr_prev) & (rr_prev <= relative_short_rr_s)
+    pause_flags = np.isfinite(post_pause_ratio) & (post_pause_ratio >= min_pause_ratio)
+    support_flags = short_flags | pause_flags
+    window = max(3, burst_window_beats)
+    for i in range(1, len(features)):
+        a = max(1, i - window // 2)
+        b = min(len(features) - 1, i + window // 2)
+        if b - a + 1 < 3:
+            continue
+        if int(np.sum(support_flags[a : b + 1])) < burst_min_abnormal:
+            continue
+        if float(np.nanmean(local_cv[a : b + 1])) < burst_min_cv:
+            continue
+        if float(np.nanmean(local_rmssd[a : b + 1])) < burst_min_rmssd:
+            continue
+        if has_morphology and float(np.nanmean(morph_z[a : b + 1])) < burst_min_morph_z:
+            continue
+        add_candidate(a, b, "rr_irregular_burst")
+
+    if not candidates:
+        return _empty_ectopy_candidates()
+    out = pd.DataFrame(candidates)
+    out = out.sort_values(["start_s", "end_s", "pattern"]).drop_duplicates(["start_s", "end_s", "pattern"])
+    return out.reset_index(drop=True)
+
+
+def score_ectopy_candidates(candidates, config=None):
+    """Attach confidence and density support to raw ectopy candidates."""
+    if candidates is None or len(candidates) == 0:
+        return _empty_ectopy_candidates()
+    config = dict(config or {})
+    density_window_s = float(config.get("flood_density_window_s", ECTOPY_FLOOD_DENSITY_WINDOW_S))
+    min_density = max(int(config.get("flood_min_density", ECTOPY_FLOOD_MIN_DENSITY)), 1)
+    recording_duration_s = float(config.get("recording_duration_s", 0.0))
+
+    out = candidates.copy().sort_values(["start_s", "end_s"]).reset_index(drop=True)
+    starts = out["start_s"].to_numpy(dtype=float)
+    density = np.array([int(np.sum(np.abs(starts - start) <= density_window_s)) for start in starts], dtype=int)
+    out["candidate_density"] = density
+    out["density_support"] = np.clip(density / float(min_density), 0.0, 1.0)
+    duration_hours = max(recording_duration_s / 3600.0, 1e-12)
+    out["candidate_rate_per_hour"] = float(len(out) / duration_hours)
+    confidence = (
+        0.45 * out["rr_support"].fillna(0.0).astype(float)
+        + 0.20 * out["pause_support"].fillna(0.0).astype(float)
+        + 0.25 * out["morph_support"].fillna(0.0).astype(float)
+        + 0.10 * out["density_support"].fillna(0.0).astype(float)
+    )
+    pattern_boost = out["pattern"].map(
+        {
+            "short_coupled_run": 0.08,
+            "premature_plus_pause": 0.04,
+            "morphology_cluster": 0.02,
+            "rr_irregular_burst": 0.03,
+        }
+    ).fillna(0.0)
+    out["confidence"] = np.clip(confidence + pattern_boost, 0.0, 1.0)
+    short = out["pattern"].to_numpy(dtype=object) == "short_coupled_run"
+    if np.any(short):
+        out.loc[short, "confidence"] = out.loc[short, "short_coupled_confidence"].astype(float)
+    return out
+
+
+def detect_short_coupled_ectopy(
+    features,
+    short_rr_s=ECTOPY_SHORT_RR_S,
+    relative_rr_fraction=ECTOPY_RELATIVE_RR_FRACTION,
+    max_following_rr_s=1.05,
+    merge_gap_s=ECTOPY_MERGE_GAP_S,
+    beats=None,
+    patient_memory=None,
+    min_morph_z=None,
+    flood_rate_per_hour=ECTOPY_FLOOD_RATE_PER_HOUR,
+    flood_min_confidence=ECTOPY_FLOOD_MIN_CONFIDENCE,
+    flood_density_window_s=ECTOPY_FLOOD_DENSITY_WINDOW_S,
+    flood_min_density=ECTOPY_FLOOD_MIN_DENSITY,
+    flood_min_candidates=ECTOPY_FLOOD_MIN_CANDIDATES,
+):
+    """
+    Detect short MITDB-style ectopic-like episodes through raw candidates,
+    candidate scoring, and flood filtering.
+    """
+    if len(features) < 3:
+        return _empty_ectopy_candidates()
+
+    config = {
+        "short_rr_s": short_rr_s,
+        "relative_rr_fraction": relative_rr_fraction,
+        "max_following_rr_s": max_following_rr_s,
+        "min_morph_z": min_morph_z,
+        "flood_density_window_s": flood_density_window_s,
+        "flood_min_density": flood_min_density,
+        "recording_duration_s": float(features["time_s"].iloc[-1] - features["time_s"].iloc[0]) if len(features) else 0.0,
+    }
+    candidates = detect_ectopy_candidates(features, beats=beats, patient_memory=patient_memory, config=config)
+    # The additional candidate families are exposed for diagnostics/experiments,
+    # but the production MITDB evidence path keeps the high-precision pattern
+    # until patient-wise tuning proves a broader policy is safe.
+    candidates = candidates[candidates["pattern"] == "short_coupled_run"].reset_index(drop=True)
+    episodes = score_ectopy_candidates(candidates, config=config)
     episodes = filter_ectopy_candidate_flood(
         episodes,
-        recording_duration_s=float(times[-1] - times[0]) if len(times) else 0.0,
+        recording_duration_s=config["recording_duration_s"],
         flood_rate_per_hour=flood_rate_per_hour,
         flood_min_confidence=flood_min_confidence,
         flood_density_window_s=flood_density_window_s,
@@ -566,6 +759,11 @@ def _diagnostic_row(status, episode, pipeline=None):
         "beats": episode.get("beats", np.nan),
         "candidate_density": episode.get("candidate_density", np.nan),
         "candidate_rate_per_hour": episode.get("candidate_rate_per_hour", np.nan),
+        "pattern": episode.get("pattern", ""),
+        "rr_support": episode.get("rr_support", np.nan),
+        "pause_support": episode.get("pause_support", np.nan),
+        "morph_support": episode.get("morph_support", np.nan),
+        "density_support": episode.get("density_support", np.nan),
         "mean_rr_prev": episode.get("mean_rr_prev", np.nan),
         "min_rr_prev": episode.get("min_rr_prev", np.nan),
         "max_rr_prev": episode.get("max_rr_prev", np.nan),

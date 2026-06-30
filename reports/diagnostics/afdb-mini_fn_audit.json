@@ -1,0 +1,22 @@
+[
+  {
+    "record_id": "afdb/04015",
+    "episode_time": 487.092,
+    "start_s": 487.092,
+    "end_s": 488.776,
+    "label_type": "af_like",
+    "generated_candidate_yes_no": "no",
+    "rejected_stage": "label_matching_or_episode_boundary",
+    "best_candidate_iou": 0.022812246003793363,
+    "best_final_iou": 0.022812246003793363,
+    "source": "baseline",
+    "rr_pattern": "baseline",
+    "rr_support": 0.0,
+    "morphology_score": 0.0,
+    "sqi": 1.0,
+    "density": 0.0,
+    "pause_support": 0.0,
+    "ectopy_pattern": "baseline",
+    "final_decision": "FN"
+  }
+]

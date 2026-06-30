@@ -17,6 +17,10 @@ FEATURE_COLUMNS = [
     "sqi",
     "rpeak_uncertainty",
     "reliability",
+    "short_run_length",
+    "post_pause_ratio",
+    "local_premature_density",
+    "irregularity_active_fraction",
     "patient_rr_z",
     "delta_rr_z_abs",
     "rmssd_z",
@@ -30,7 +34,7 @@ FEATURE_COLUMNS = [
 ]
 
 
-def build_pasm_feature_frame(record, split="unspecified", pipeline=None):
+def build_pasm_feature_frame(record, split="unspecified", pipeline=None, expand_short_ectopy=False):
     """
     Build a per-beat PASM feature table for one PhysioNetRecord.
 
@@ -53,7 +57,12 @@ def build_pasm_feature_frame(record, split="unspecified", pipeline=None):
             "record_id": record.record_id,
             "time_s": features["time_s"].to_numpy(dtype=float),
             "split": split,
-            "label": assign_beat_labels(features["time_s"].to_numpy(dtype=float), record.truth_episodes),
+            "label": assign_beat_labels(
+                features["time_s"].to_numpy(dtype=float),
+                record.truth_episodes,
+                record_id=record.record_id,
+                expand_short_ectopy=expand_short_ectopy,
+            ),
         }
     )
     for column in [
@@ -68,8 +77,12 @@ def build_pasm_feature_frame(record, split="unspecified", pipeline=None):
         "sqi",
         "rpeak_uncertainty",
         "reliability",
+        "short_run_length",
+        "post_pause_ratio",
+        "local_premature_density",
+        "irregularity_active_fraction",
     ]:
-        out[column] = features[column].to_numpy(dtype=float)
+        out[column] = features[column].to_numpy(dtype=float) if column in features else 0.0
 
     out["patient_rr_z"] = robust_z(out["rr_prev"].to_numpy(), patient_memory.rr_median, patient_memory.rr_mad)
     out["delta_rr_z_abs"] = np.abs(
@@ -88,7 +101,7 @@ def build_pasm_feature_frame(record, split="unspecified", pipeline=None):
     return out[["record_id", "time_s", "split", "label"] + FEATURE_COLUMNS]
 
 
-def assign_beat_labels(times_s, truth_episodes):
+def assign_beat_labels(times_s, truth_episodes, record_id="", expand_short_ectopy=False):
     times_s = np.asarray(times_s, dtype=float)
     labels = np.full(len(times_s), "normal", dtype=object)
     if truth_episodes is None or len(truth_episodes) == 0:
@@ -98,6 +111,18 @@ def assign_beat_labels(times_s, truth_episodes):
     for _, row in truth.iterrows():
         mask = (labels == "normal") & (times_s >= float(row["start_s"])) & (times_s <= float(row["end_s"]))
         labels[mask] = str(row["type"])
+        if (
+            expand_short_ectopy
+            and str(record_id).startswith("mitdb/")
+            and str(row["type"]) == "ectopic_like"
+            and float(row["end_s"]) - float(row["start_s"]) <= 3.0
+        ):
+            hit = np.where((times_s >= float(row["start_s"])) & (times_s <= float(row["end_s"])))[0]
+            if len(hit) > 0:
+                a = max(0, int(hit[0]) - 1)
+                b = min(len(labels), int(hit[-1]) + 2)
+                expanded = np.arange(a, b)
+                labels[(labels == "normal") & np.isin(np.arange(len(labels)), expanded)] = "ectopic_like"
     return labels
 
 
@@ -112,13 +137,20 @@ def compute_morph_z(beats, patient_memory, n_rows):
     return np.nan_to_num(morph_z, nan=0.0, posinf=8.0, neginf=0.0)
 
 
-def build_pasm_dataset(records_by_split, pipeline_by_record_id=None):
+def build_pasm_dataset(records_by_split, pipeline_by_record_id=None, expand_short_ectopy=False):
     rows = []
     pipeline_by_record_id = pipeline_by_record_id or {}
     for split, records in records_by_split.items():
         for record in records:
             pipeline = pipeline_by_record_id.get(record.record_id)
-            rows.append(build_pasm_feature_frame(record, split=split, pipeline=pipeline))
+            rows.append(
+                build_pasm_feature_frame(
+                    record,
+                    split=split,
+                    pipeline=pipeline,
+                    expand_short_ectopy=expand_short_ectopy,
+                )
+            )
     if not rows:
         return pd.DataFrame(columns=["record_id", "time_s", "split", "label"] + FEATURE_COLUMNS)
     return pd.concat(rows, ignore_index=True)

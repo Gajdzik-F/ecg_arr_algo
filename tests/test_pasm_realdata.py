@@ -74,6 +74,8 @@ class PASMRealDataTest(unittest.TestCase):
         self.assertEqual(len(result["informative_records"]), 2)
         self.assertEqual(len(result["inventory"]), 2)
         self.assertEqual(result["inventory"]["truth_episodes"].tolist(), [1, 1])
+        self.assertIn("candidate_metrics", result)
+        self.assertIn("fn_audit", result)
         self.assertIn("pasm_physionet", set(result["summary"]["model"]))
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -103,6 +105,8 @@ class PASMRealDataTest(unittest.TestCase):
 
         self.assertIn("PASM-Rhythm Real-Data Summary", text)
         self.assertIn("Loaded Record Inventory", text)
+        self.assertIn("Candidate-Level Metrics", text)
+        self.assertIn("False-Negative Stage Audit", text)
         self.assertIn("afdb/04015", text)
         self.assertIn("<!doctype html>", html)
         self.assertIn("Real-Data Report: afdb-smoke", html)

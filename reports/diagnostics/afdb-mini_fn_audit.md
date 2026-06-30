@@ -1,0 +1,5 @@
+# False-Negative Stage Audit
+
+| record_id | episode_time | start_s | end_s | label_type | generated_candidate_yes_no | rejected_stage | best_candidate_iou | best_final_iou | source | rr_pattern | rr_support | morphology_score | sqi | density | pause_support | ectopy_pattern | final_decision |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| afdb/04015 | 487.092 | 487.092 | 488.776 | af_like | no | label_matching_or_episode_boundary | 0.023 | 0.023 | baseline | baseline | 0.000 | 0.000 | 1.000 | 0.000 | 0.000 | baseline | FN |

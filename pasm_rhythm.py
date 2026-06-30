@@ -122,17 +122,39 @@ def compute_rhythm_features(
     local_rmssd = np.full(n, np.nan, dtype=float)
     local_cv = np.full(n, np.nan, dtype=float)
     local_rr_median = np.full(n, np.nan, dtype=float)
+    short_run_length = np.zeros(n, dtype=float)
+    post_pause_ratio = np.full(n, np.nan, dtype=float)
+    local_premature_density = np.zeros(n, dtype=float)
+    irregularity_active_fraction = np.zeros(n, dtype=float)
 
     for i in range(n):
         a = max(0, i - win_beats + 1)
         seg = rr_prev[a : i + 1]
         seg = seg[np.isfinite(seg) & (seg > 0)]
         if len(seg) >= max(3, win_beats // 2):
-            local_rr_median[i] = np.median(seg)
+            median_rr = np.median(seg)
+            local_rr_median[i] = median_rr
             local_cv[i] = np.std(seg) / (np.mean(seg) + 1e-12)
             if len(seg) >= 3:
                 d = np.diff(seg)
                 local_rmssd[i] = np.sqrt(np.mean(d * d))
+            short_threshold = min(0.50, float(median_rr) * 0.75)
+            short_flags = seg <= short_threshold
+            local_premature_density[i] = float(np.mean(short_flags))
+            irregularity_active_fraction[i] = float(np.mean(np.abs(seg - median_rr) / (median_rr + 1e-12) >= 0.12))
+
+        if np.isfinite(local_rr_median[i]):
+            reference_rr = local_rr_median[i]
+        else:
+            history = rr_prev[: i + 1]
+            history = history[np.isfinite(history) & (history > 0)]
+            reference_rr = np.median(history) if len(history) else np.nan
+        if np.isfinite(reference_rr) and reference_rr > 0:
+            if np.isfinite(rr_next[i]) and rr_next[i] > 0:
+                post_pause_ratio[i] = rr_next[i] / reference_rr
+            short_threshold = min(0.50, float(reference_rr) * 0.75)
+            if np.isfinite(rr_prev[i]) and rr_prev[i] <= short_threshold:
+                short_run_length[i] = (short_run_length[i - 1] if i > 0 else 0.0) + 1.0
 
     reliability = np.clip(sqi_at_r * (1.0 - np.clip(rpeak_uncertainty, 0.0, 1.0)), 0.0, 1.0)
 
@@ -150,6 +172,10 @@ def compute_rhythm_features(
             "sqi": sqi_at_r,
             "rpeak_uncertainty": rpeak_uncertainty,
             "reliability": reliability,
+            "short_run_length": short_run_length,
+            "post_pause_ratio": post_pause_ratio,
+            "local_premature_density": local_premature_density,
+            "irregularity_active_fraction": irregularity_active_fraction,
         }
     )
 
@@ -188,7 +214,10 @@ def build_patient_memory(
     if len(idx) == 0:
         idx = np.arange(min(n, baseline_limit))
 
-    rr = cand["rr_prev"].to_numpy()[idx]
+    rr_all = cand["rr_prev"].to_numpy()
+    idx = _refine_baseline_indices(rr_all, idx)
+
+    rr = rr_all[idx]
     rr = rr[np.isfinite(rr) & (rr > 0)]
     rr_median = _safe_nanmedian(rr, default=1.0)
     rr_mad = _mad(rr)
@@ -211,6 +240,12 @@ def build_patient_memory(
             baseline_beats = beats[beat_idx]
             morphology_prototype = np.median(baseline_beats, axis=0)
             distances = np.linalg.norm(baseline_beats - morphology_prototype[None, :], axis=1)
+            keep = _baseline_distance_mask(distances)
+            if np.sum(keep) >= max(8, min(30, len(beat_idx) // 2)):
+                beat_idx = beat_idx[keep]
+                baseline_beats = beats[beat_idx]
+                morphology_prototype = np.median(baseline_beats, axis=0)
+                distances = np.linalg.norm(baseline_beats - morphology_prototype[None, :], axis=1)
             morphology_scale = max(float(np.percentile(distances, 90)), _mad(distances))
 
     return PatientMemory(
@@ -223,6 +258,39 @@ def build_patient_memory(
         sqi_median=float(sqi_median),
         n_baseline_beats=int(len(idx)),
     )
+
+
+def _refine_baseline_indices(rr_all, idx, iterations=2, max_abs_z=4.0):
+    idx = np.asarray(idx, dtype=int)
+    rr_all = np.asarray(rr_all, dtype=float)
+    for _ in range(int(iterations)):
+        if len(idx) < 8:
+            break
+        rr = rr_all[idx]
+        finite = np.isfinite(rr) & (rr > 0)
+        if np.sum(finite) < 8:
+            break
+        valid_idx = idx[finite]
+        valid_rr = rr[finite]
+        center = np.median(valid_rr)
+        scale = _mad(valid_rr)
+        keep = np.abs(robust_z(valid_rr, center, scale)) <= float(max_abs_z)
+        if np.sum(keep) < max(8, len(valid_idx) // 2):
+            break
+        idx = valid_idx[keep]
+    return idx
+
+
+def _baseline_distance_mask(distances, max_abs_z=4.0):
+    distances = np.asarray(distances, dtype=float)
+    finite = np.isfinite(distances)
+    if np.sum(finite) < 8:
+        return np.ones(len(distances), dtype=bool)
+    center = np.median(distances[finite])
+    scale = _mad(distances[finite])
+    keep = np.ones(len(distances), dtype=bool)
+    keep[finite] = np.abs(robust_z(distances[finite], center, scale)) <= float(max_abs_z)
+    return keep
 
 
 def score_pasm_states(

@@ -3,23 +3,25 @@
 This report combines the configured WFDB/PhysioNet real-data preset.
 It is a research validation checkpoint, not clinical certification.
 
-Preset: `smoke`
-Records loaded: 3
-Records with truth episodes: 3
+Preset: `mitdb-mini`
+Records loaded: 5
+Records with truth episodes: 4
 
 ## Loaded Record Inventory
 
 | record_id | duration_s | beats | truth_episodes | truth_duration_s | truth_types |
 | --- | --- | --- | --- | --- | --- |
 | mitdb/200 | 900.000 | 1328 | 2 | 2.244 | ectopic_like |
-| afdb/04015 | 900.000 | 1464 | 3 | 203.800 | af_like |
-| afdb/04126 | 900.000 | 1893 | 2 | 586.000 | af_like |
+| mitdb/201 | 900.000 | 1038 | 1 | 0.978 | ectopic_like |
+| mitdb/203 | 900.000 | 1542 | 12 | 11.842 | ectopic_like |
+| mitdb/205 | 900.000 | 1379 | 2 | 5.364 | ectopic_like |
+| mitdb/208 | 900.000 | 1503 | 0 | 0.000 |  |
 
 ## Summary
 
 | model | episode_f1_mean | episode_precision_mean | episode_recall_mean | false_alarms_per_hour_mean | typed_f1_mean |
 | --- | --- | --- | --- | --- | --- |
-| pasm_physionet | 0.822 | 1.000 | 0.722 | 0.000 | 0.964 |
+| pasm_physionet | 0.542 | 0.625 | 0.500 | 9.000 | 0.908 |
 
 ## Evidence Layer Parameters
 
@@ -41,33 +43,41 @@ Records with truth episodes: 3
 
 | record_id | type | precision | recall | f1 | mean_iou |
 | --- | --- | --- | --- | --- | --- |
-| afdb/04015 | af_like | 1.000 | 0.667 | 0.800 | 0.823 |
-| afdb/04015 | ectopic_like | 1.000 | 1.000 | 1.000 |  |
-| afdb/04015 | noise_uncertain | 1.000 | 1.000 | 1.000 |  |
-| afdb/04015 | sinus_brady | 1.000 | 1.000 | 1.000 |  |
-| afdb/04015 | sinus_tachy | 1.000 | 1.000 | 1.000 |  |
-| afdb/04126 | af_like | 1.000 | 1.000 | 1.000 | 0.916 |
-| afdb/04126 | ectopic_like | 1.000 | 1.000 | 1.000 |  |
-| afdb/04126 | noise_uncertain | 1.000 | 1.000 | 1.000 |  |
-| afdb/04126 | sinus_brady | 1.000 | 1.000 | 1.000 |  |
-| afdb/04126 | sinus_tachy | 1.000 | 1.000 | 1.000 |  |
 | mitdb/200 | af_like | 1.000 | 1.000 | 1.000 |  |
 | mitdb/200 | ectopic_like | 1.000 | 0.500 | 0.667 | 1.000 |
 | mitdb/200 | noise_uncertain | 1.000 | 1.000 | 1.000 |  |
 | mitdb/200 | sinus_brady | 1.000 | 1.000 | 1.000 |  |
 | mitdb/200 | sinus_tachy | 1.000 | 1.000 | 1.000 |  |
+| mitdb/201 | af_like | 1.000 | 1.000 | 1.000 |  |
+| mitdb/201 | ectopic_like | 0.000 | 0.000 | 0.000 |  |
+| mitdb/201 | noise_uncertain | 1.000 | 1.000 | 1.000 |  |
+| mitdb/201 | sinus_brady | 1.000 | 1.000 | 1.000 |  |
+| mitdb/201 | sinus_tachy | 1.000 | 1.000 | 1.000 |  |
+| mitdb/203 | af_like | 1.000 | 1.000 | 1.000 |  |
+| mitdb/203 | ectopic_like | 0.500 | 0.500 | 0.500 | 0.818 |
+| mitdb/203 | noise_uncertain | 1.000 | 1.000 | 1.000 |  |
+| mitdb/203 | sinus_brady | 1.000 | 1.000 | 1.000 |  |
+| mitdb/203 | sinus_tachy | 1.000 | 1.000 | 1.000 |  |
+| mitdb/205 | af_like | 1.000 | 1.000 | 1.000 |  |
+| mitdb/205 | ectopic_like | 1.000 | 1.000 | 1.000 | 0.800 |
+| mitdb/205 | noise_uncertain | 1.000 | 1.000 | 1.000 |  |
+| mitdb/205 | sinus_brady | 1.000 | 1.000 | 1.000 |  |
+| mitdb/205 | sinus_tachy | 1.000 | 1.000 | 1.000 |  |
 
 ## Per-Record Episode Metrics
 
 | record_id | tp_macro | fp_macro | fn_macro | precision_macro | recall_macro | f1_macro | f1_false_alarms_per_hour |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| afdb/04015 | 2 | 0 | 1 | 1.000 | 0.667 | 0.800 | 0.000 |
-| afdb/04126 | 2 | 0 | 0 | 1.000 | 1.000 | 1.000 | 0.000 |
 | mitdb/200 | 1 | 0 | 1 | 1.000 | 0.500 | 0.667 | 0.000 |
+| mitdb/201 | 0 | 3 | 1 | 0.000 | 0.000 | 0.000 | 12.000 |
+| mitdb/203 | 6 | 6 | 6 | 0.500 | 0.500 | 0.500 | 24.000 |
+| mitdb/205 | 2 | 0 | 0 | 1.000 | 1.000 | 1.000 | 0.000 |
 
 ## Skipped Or Empty Records
 
-_None._
+| record_id | reason |
+| --- | --- |
+| mitdb/208 | empty_truth |
 
 ## Diagnostic Sidecars
 

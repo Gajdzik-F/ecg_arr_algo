@@ -5,6 +5,15 @@ import numpy as np
 import pandas as pd
 
 from pasm_dataset import FEATURE_COLUMNS, build_pasm_dataset, build_pasm_feature_frame
+from pasm_ai_reranker import (
+    RERANKER_FEATURE_COLUMNS,
+    build_episode_candidate_dataset,
+    fit_episode_reranker,
+    label_episode_candidates,
+    predict_reranked_episodes,
+    tune_pattern_policy,
+    tune_reranker_threshold,
+)
 from pasm_ml_decoder import fit_softmax_decoder
 from pasm_physionet import (
     filter_predictions_for_annotation_scope,
@@ -115,9 +124,19 @@ def run_ml_validation(
 
     all_records = train_records + holdout_records
     pipelines = {record.record_id: run_pasm_physionet_pipeline(record) for record in all_records}
-    dataset = build_pasm_dataset({"train": train_records, "holdout": holdout_records}, pipelines)
+    dataset = build_pasm_dataset(
+        {"train": train_records, "holdout": holdout_records},
+        pipelines,
+        expand_short_ectopy=True,
+    )
     train_df = dataset[dataset["split"] == "train"].reset_index(drop=True)
     holdout_df = dataset[dataset["split"] == "holdout"].reset_index(drop=True)
+    reranker_train_df, reranker_train_uncovered = build_episode_candidate_dataset(train_records, pipelines, split="train")
+    reranker_holdout_df, reranker_holdout_uncovered = build_episode_candidate_dataset(
+        holdout_records,
+        pipelines,
+        split="holdout",
+    )
 
     model = fit_softmax_decoder(
         train_df,
@@ -195,12 +214,85 @@ def run_ml_validation(
         model_name="pasm_ml_decoder_fpaware",
         guarded_config=tuned_guarded_config,
     )
+    reranker_fit_df = _reranker_fit_frame(reranker_train_df)
+    reranker_safe_model = fit_episode_reranker(
+        reranker_fit_df,
+        RERANKER_FEATURE_COLUMNS,
+        epochs=epochs,
+        lr=lr,
+        l2=l2,
+        seed=seed + 2,
+        max_class_weight=MAX_CLASS_WEIGHT,
+    )
+    reranker_safe_threshold, reranker_safe_train_metrics = tune_reranker_threshold(
+        train_records,
+        pipelines,
+        reranker_safe_model,
+        fp_per_hour_limit=9.0,
+        candidate_policy="safe",
+        model_name="pasm_ai_reranker_safe",
+    )
+    reranker_episode_boost = build_episode_hard_negative_boosts(
+        train_records,
+        pipelines,
+        reranker_fit_df,
+        reranker_safe_model,
+        threshold=reranker_safe_threshold,
+        candidate_policy="pattern_v2",
+    )
+    reranker_v2_model = fit_episode_reranker(
+        reranker_fit_df,
+        RERANKER_FEATURE_COLUMNS,
+        epochs=epochs,
+        lr=lr,
+        l2=l2,
+        seed=seed + 3,
+        max_class_weight=MAX_CLASS_WEIGHT,
+        sample_weight_boost=reranker_episode_boost,
+    )
+    reranker_v2_threshold, reranker_v2_policy_config, reranker_v2_train_metrics = tune_pattern_policy(
+        train_records,
+        pipelines,
+        reranker_v2_model,
+        target_fp_per_hour=9.0,
+    )
+    reranker_safe_holdout_metrics = evaluate_reranker_records(
+        holdout_records,
+        pipelines,
+        reranker_safe_model,
+        threshold=reranker_safe_threshold,
+        candidate_policy="safe",
+        model_name="pasm_ai_reranker_safe",
+    )
+    reranker_v2_holdout_metrics = evaluate_reranker_records(
+        holdout_records,
+        pipelines,
+        reranker_v2_model,
+        threshold=reranker_v2_threshold,
+        candidate_policy="pattern_v2",
+        policy_config=reranker_v2_policy_config,
+        model_name="pasm_ai_reranker_v2",
+    )
     train_metrics = pd.concat(
-        [baseline_train_metrics, train_ml_metrics, guarded_train_metrics, fpaware_train_metrics],
+        [
+            baseline_train_metrics,
+            train_ml_metrics,
+            guarded_train_metrics,
+            fpaware_train_metrics,
+            reranker_safe_train_metrics,
+            reranker_v2_train_metrics,
+        ],
         ignore_index=True,
     )
     holdout_metrics = pd.concat(
-        [baseline_holdout_metrics, ml_holdout_metrics, guarded_holdout_metrics, fpaware_holdout_metrics],
+        [
+            baseline_holdout_metrics,
+            ml_holdout_metrics,
+            guarded_holdout_metrics,
+            fpaware_holdout_metrics,
+            reranker_safe_holdout_metrics,
+            reranker_v2_holdout_metrics,
+        ],
         ignore_index=True,
     )
     holdout_predictions = collect_holdout_predictions(
@@ -211,6 +303,11 @@ def run_ml_validation(
         fpaware_model,
         fpaware_thresholds,
         tuned_guarded_config,
+        reranker_safe_model,
+        reranker_safe_threshold,
+        reranker_v2_model,
+        reranker_v2_threshold,
+        reranker_v2_policy_config,
     )
     guard_removed = collect_guard_removed(
         holdout_records,
@@ -221,6 +318,15 @@ def run_ml_validation(
         ],
         tuned_guarded_config,
     )
+    reranker_removed = collect_reranker_removed(
+        holdout_records,
+        pipelines,
+        [
+            ("pasm_ai_reranker_safe", reranker_safe_model, reranker_safe_threshold, "safe", None),
+            ("pasm_ai_reranker_v2", reranker_v2_model, reranker_v2_threshold, "pattern_v2", reranker_v2_policy_config),
+        ],
+    )
+    reranker_loro = run_mitdb_loro_reranker_validation(all_records, pipelines, epochs=epochs, lr=lr, l2=l2, seed=seed)
 
     return {
         "preset": preset or "custom",
@@ -233,14 +339,29 @@ def run_ml_validation(
         "dataset": dataset,
         "train_df": train_df,
         "holdout_df": holdout_df,
+        "reranker_train_df": reranker_train_df,
+        "reranker_holdout_df": reranker_holdout_df,
+        "reranker_train_uncovered": reranker_train_uncovered,
+        "reranker_holdout_uncovered": reranker_holdout_uncovered,
         "model": model,
         "fpaware_model": fpaware_model,
+        "reranker_model": reranker_safe_model,
+        "reranker_safe_model": reranker_safe_model,
+        "reranker_v2_model": reranker_v2_model,
+        "reranker_threshold": reranker_safe_threshold,
+        "reranker_safe_threshold": reranker_safe_threshold,
+        "reranker_v2_threshold": reranker_v2_threshold,
+        "reranker_v2_policy_config": reranker_v2_policy_config,
         "thresholds": thresholds,
         "fpaware_thresholds": fpaware_thresholds,
         "guarded_config": tuned_guarded_config,
         "hard_negative_count": int(np.sum(hard_negative_boost > 1.0)),
         "hard_negative_boost": HARD_NEGATIVE_BOOST,
+        "reranker_hard_negative_count": int(np.sum(reranker_episode_boost > 1.0)),
+        "reranker_hard_negative_boost": HARD_NEGATIVE_BOOST,
         "guard_removed": guard_removed,
+        "reranker_removed": reranker_removed,
+        "reranker_loro": reranker_loro,
         "holdout_predictions": holdout_predictions,
         "train_metrics": train_metrics,
         "train_summary": summarize_benchmark(train_metrics),
@@ -251,6 +372,95 @@ def run_ml_validation(
 
 def _informative_records(records):
     return [record for record in records if record.truth_episodes is not None and len(record.truth_episodes) > 0]
+
+
+def _reranker_fit_frame(candidate_df):
+    if candidate_df is None or len(candidate_df) == 0:
+        return candidate_df
+    labels = set(candidate_df["accepted"].astype(int).tolist()) if "accepted" in candidate_df else set()
+    if labels == {0, 1}:
+        return candidate_df
+    if labels == {0}:
+        synthetic = candidate_df.head(1).copy()
+        synthetic["accepted"] = 1
+        synthetic["source"] = "fallback_accept"
+        synthetic["confidence"] = 1.0
+        synthetic["mean_state_score"] = 1.0
+        synthetic["max_state_score"] = 1.0
+        return pd.concat([candidate_df, synthetic], ignore_index=True)
+    synthetic = candidate_df.copy()
+    synthetic["accepted"] = 0
+    synthetic["source"] = "fallback_reject"
+    for col in ["confidence", "mean_state_score", "max_state_score", "rr_support", "pause_support", "morph_support", "density_support"]:
+        if col in synthetic:
+            synthetic[col] = 0.0
+    return pd.concat([candidate_df, synthetic], ignore_index=True)
+
+
+def run_mitdb_loro_reranker_validation(records, pipelines, epochs=800, lr=0.05, l2=1e-3, seed=2026):
+    mitdb_records = [record for record in records if str(record.record_id).startswith("mitdb/")]
+    if len(mitdb_records) < 2:
+        return pd.DataFrame(columns=["test_record_id", "train_record_ids", "f1", "false_alarms_per_hour"])
+    rows = []
+    for fold, test_record in enumerate(mitdb_records):
+        train_records = [record for record in mitdb_records if record.record_id != test_record.record_id]
+        train_df, _ = build_episode_candidate_dataset(train_records, pipelines, split="train")
+        fit_df = _reranker_fit_frame(train_df)
+        if fit_df is None or len(fit_df) == 0:
+            continue
+        model = fit_episode_reranker(
+            fit_df,
+            RERANKER_FEATURE_COLUMNS,
+            epochs=min(120, max(40, int(epochs // 6))),
+            lr=lr,
+            l2=l2,
+            seed=seed + 100 + fold,
+            max_class_weight=MAX_CLASS_WEIGHT,
+        )
+        boost = build_episode_hard_negative_boosts(
+            train_records,
+            pipelines,
+            fit_df,
+            model,
+            threshold=0.50,
+            candidate_policy="pattern_v2",
+        )
+        model = fit_episode_reranker(
+            fit_df,
+            RERANKER_FEATURE_COLUMNS,
+            epochs=min(120, max(40, int(epochs // 6))),
+            lr=lr,
+            l2=l2,
+            seed=seed + 200 + fold,
+            max_class_weight=MAX_CLASS_WEIGHT,
+            sample_weight_boost=boost,
+        )
+        threshold, policy_config, _ = tune_pattern_policy(train_records, pipelines, model, target_fp_per_hour=9.0)
+        metrics = evaluate_reranker_records(
+            [test_record],
+            pipelines,
+            model,
+            threshold=threshold,
+            candidate_policy="pattern_v2",
+            policy_config=policy_config,
+            model_name="pasm_ai_reranker_v2_loro",
+        )
+        macro = metrics[metrics["type"] == "macro"].iloc[0]
+        faph = metrics[metrics["type"] == "false_alarms_per_hour"].iloc[0]
+        rows.append(
+            {
+                "test_record_id": test_record.record_id,
+                "train_record_ids": ",".join(record.record_id for record in train_records),
+                "threshold": threshold,
+                "f1": float(macro["f1"]),
+                "precision": float(macro["precision"]),
+                "recall": float(macro["recall"]),
+                "false_alarms_per_hour": float(faph["f1"]),
+            }
+        )
+    if not rows:
+        return pd.DataFrame(columns=["test_record_id", "train_record_ids", "threshold", "f1", "false_alarms_per_hour"])
+    return pd.DataFrame(rows)
 
 
 def skipped_records_table(train_records, holdout_records):
@@ -298,6 +508,50 @@ def build_hard_negative_boosts(records, pipelines, train_df, model, thresholds):
         for _, row in fp.iterrows():
             time_mask = (train_df["time_s"] >= float(row["start_s"])) & (train_df["time_s"] <= float(row["end_s"]))
             boosts[record_mask & time_mask] = HARD_NEGATIVE_BOOST
+    return boosts
+
+
+def build_episode_hard_negative_boosts(records, pipelines, candidate_df, reranker_model, threshold=0.50, candidate_policy="pattern_v2"):
+    boosts = np.ones(len(candidate_df), dtype=float)
+    if candidate_df is None or len(candidate_df) == 0:
+        return boosts
+    for record in records:
+        candidates = predict_reranked_candidates(
+            record,
+            pipelines[record.record_id],
+            reranker_model,
+            threshold=threshold,
+            candidate_policy=candidate_policy,
+        )
+        if len(candidates) == 0:
+            continue
+        labeled, _ = label_episode_candidates(candidates, record.truth_episodes, record_id=record.record_id, split="train")
+        labeled["ai_decision"] = candidates["ai_decision"].to_numpy(dtype=object)
+        false_accepts = labeled[(labeled["ai_decision"] == "accept") & (labeled["accepted"].astype(int) == 0)]
+        if len(false_accepts) == 0:
+            continue
+        record_mask = candidate_df["record_id"].astype(str) == record.record_id
+        for _, row in false_accepts.iterrows():
+            start = float(row.get("start_s", np.nan))
+            end = float(row.get("end_s", np.nan))
+            pattern = str(row.get("pattern", ""))
+            source = str(row.get("source", ""))
+            if not np.isfinite(start) or not np.isfinite(end):
+                continue
+            same_candidate = (
+                record_mask
+                & (candidate_df["source"].astype(str) == source)
+                & (candidate_df["pattern"].astype(str) == pattern)
+                & np.isclose(candidate_df["start_s"].astype(float), start)
+                & np.isclose(candidate_df["end_s"].astype(float), end)
+            )
+            weight = HARD_NEGATIVE_BOOST
+            duration = max(0.0, end - start)
+            if source == "relaxed_ectopy" and (pattern == "morphology_cluster" or duration > 2.5):
+                weight = HARD_NEGATIVE_BOOST * 1.5
+            if source == "relaxed_ectopy" and pattern == "short_coupled_run" and duration <= 1.5:
+                weight = HARD_NEGATIVE_BOOST * 1.25
+            boosts[same_candidate.to_numpy(dtype=bool)] = weight
     return boosts
 
 
@@ -363,6 +617,36 @@ def evaluate_ml_records(records, pipelines, model, thresholds=None, model_name="
     return pd.concat(rows, ignore_index=True)
 
 
+def evaluate_reranker_records(
+    records,
+    pipelines,
+    reranker_model,
+    threshold=0.50,
+    model_name="pasm_ai_reranker_safe",
+    candidate_policy="safe",
+    policy_config=None,
+):
+    rows = []
+    for record in records:
+        episodes = predict_reranked_episodes(
+            record,
+            pipelines[record.record_id],
+            reranker_model,
+            threshold=threshold,
+            candidate_policy=candidate_policy,
+            policy_config=policy_config,
+        )
+        metrics = evaluate_episodes(
+            episodes,
+            normalize_episode_types(record.truth_episodes),
+            duration_s=float(len(record.signal)) / float(record.fs),
+        )
+        metrics.insert(0, "model", model_name)
+        metrics.insert(0, "record_id", record.record_id)
+        rows.append(metrics)
+    return pd.concat(rows, ignore_index=True)
+
+
 def predict_ml_episodes(record, pipeline, model, thresholds=None, guarded_config=None):
     frame = build_pasm_feature_frame(record, split="eval", pipeline=pipeline)
     state_scores = model.predict_proba(frame)
@@ -374,6 +658,7 @@ def predict_ml_episodes(record, pipeline, model, thresholds=None, guarded_config
         min_confidence_by_state=thresholds,
     )
     episodes = attach_episode_support(episodes, frame)
+    episodes = postprocess_ml_episodes(episodes, frame, candidate_policy="balanced")
     if guarded_config:
         episodes = guard_ml_episodes(episodes, guarded_config)
     return filter_predictions_for_annotation_scope(record, episodes)
@@ -392,6 +677,34 @@ def apply_normal_bias(state_scores, normal_bias):
 def guard_ml_episodes(episodes, guarded_config=None):
     kept, _ = guard_ml_episodes_with_report(episodes, guarded_config=guarded_config)
     return kept
+
+
+def postprocess_ml_episodes(episodes, frame=None, candidate_policy="balanced"):
+    if episodes is None or len(episodes) == 0 or candidate_policy is None:
+        return episodes
+    if candidate_policy != "balanced":
+        raise ValueError(f"Unknown ML episode postprocess policy: {candidate_policy!r}")
+
+    out = episodes.copy().reset_index(drop=True)
+    keep = np.ones(len(out), dtype=bool)
+    duration = out["end_s"].astype(float) - out["start_s"].astype(float)
+    beats = out.get("beats", pd.Series(np.zeros(len(out)))).fillna(0).astype(float)
+    confidence = out.get("confidence", pd.Series(np.zeros(len(out)))).fillna(0.0).astype(float)
+
+    af = out["type"].to_numpy(dtype=object) == "af_like"
+    short_af_fp_shape = af & (duration < 10.0) & (beats < 20) & (confidence < 0.95)
+    keep &= ~short_af_fp_shape
+
+    ectopy = out["type"].to_numpy(dtype=object) == "ectopic_like"
+    if np.any(ectopy):
+        morph = out.get("max_morph_z", pd.Series(np.zeros(len(out)))).fillna(0.0).astype(float)
+        delta = out.get("max_delta_rr_z_abs", pd.Series(np.zeros(len(out)))).fillna(0.0).astype(float)
+        score = out.get("max_score_ectopic_like", pd.Series(np.zeros(len(out)))).fillna(0.0).astype(float)
+        short_run = out.get("max_short_run_length", pd.Series(np.zeros(len(out)))).fillna(0.0).astype(float)
+        ectopy_supported = (morph >= 0.55) | (delta >= 3.0) | (score >= 0.45) | (short_run >= 2.0)
+        keep[ectopy] &= ectopy_supported[ectopy]
+
+    return out.loc[keep].reset_index(drop=True)
 
 
 def guard_ml_episodes_with_report(episodes, guarded_config=None, record_id="", model_name=""):
@@ -468,30 +781,47 @@ def attach_episode_support(episodes, frame):
     if episodes is None or len(episodes) == 0:
         return episodes
     out = episodes.copy()
-    support_cols = ["morph_z", "delta_rr_z_abs", "score_ectopic_like"]
+    support_cols = ["morph_z", "delta_rr_z_abs", "score_ectopic_like", "short_run_length"]
     for col in support_cols:
         if col not in frame:
             frame[col] = 0.0
     max_morph = []
     max_delta = []
     max_score = []
+    max_short_run = []
     for _, episode in out.iterrows():
         seg = frame[(frame["time_s"] >= float(episode["start_s"])) & (frame["time_s"] <= float(episode["end_s"]))]
         if len(seg) == 0:
             max_morph.append(0.0)
             max_delta.append(0.0)
             max_score.append(0.0)
+            max_short_run.append(0.0)
         else:
             max_morph.append(float(seg["morph_z"].max()))
             max_delta.append(float(seg["delta_rr_z_abs"].max()))
             max_score.append(float(seg["score_ectopic_like"].max()))
+            max_short_run.append(float(seg["short_run_length"].max()))
     out["max_morph_z"] = max_morph
     out["max_delta_rr_z_abs"] = max_delta
     out["max_score_ectopic_like"] = max_score
+    out["max_short_run_length"] = max_short_run
     return out
 
 
-def collect_holdout_predictions(records, pipelines, model, thresholds, fpaware_model, fpaware_thresholds, guarded_config):
+def collect_holdout_predictions(
+    records,
+    pipelines,
+    model,
+    thresholds,
+    fpaware_model,
+    fpaware_thresholds,
+    guarded_config,
+    reranker_safe_model=None,
+    reranker_safe_threshold=0.50,
+    reranker_v2_model=None,
+    reranker_v2_threshold=0.50,
+    reranker_v2_policy_config=None,
+):
     rows = []
     for record in records:
         baseline = pipelines[record.record_id]["episodes"]
@@ -504,12 +834,32 @@ def collect_holdout_predictions(records, pipelines, model, thresholds, fpaware_m
             fpaware_thresholds,
             guarded_config=guarded_config,
         )
-        for model_name, episodes in [
+        model_episodes = [
             ("pasm_physionet", baseline),
             ("pasm_ml_decoder", raw_ml),
             ("pasm_ml_decoder_guarded", guarded_ml),
             ("pasm_ml_decoder_fpaware", fpaware_ml),
-        ]:
+        ]
+        if reranker_safe_model is not None:
+            reranked = predict_reranked_episodes(
+                record,
+                pipelines[record.record_id],
+                reranker_safe_model,
+                threshold=reranker_safe_threshold,
+                candidate_policy="safe",
+            )
+            model_episodes.append(("pasm_ai_reranker_safe", reranked))
+        if reranker_v2_model is not None:
+            reranked_v2 = predict_reranked_episodes(
+                record,
+                pipelines[record.record_id],
+                reranker_v2_model,
+                threshold=reranker_v2_threshold,
+                candidate_policy="pattern_v2",
+                policy_config=reranker_v2_policy_config,
+            )
+            model_episodes.append(("pasm_ai_reranker_v2", reranked_v2))
+        for model_name, episodes in model_episodes:
             diagnostics = diagnostic_rows_for_predictions(
                 record,
                 episodes,
@@ -548,6 +898,67 @@ def collect_guard_removed(records, pipelines, model_specs, guarded_config):
     return pd.concat(rows, ignore_index=True)
 
 
+def collect_reranker_removed(records, pipelines, model_specs):
+    rows = []
+    for record in records:
+        for model_name, reranker_model, threshold, candidate_policy, policy_config in model_specs:
+            candidates = predict_reranked_candidates(
+                record,
+                pipelines[record.record_id],
+                reranker_model,
+                threshold=threshold,
+                candidate_policy=candidate_policy,
+                policy_config=policy_config,
+            )
+            rejected = candidates[candidates["ai_decision"] == "reject"] if len(candidates) else pd.DataFrame()
+            for _, row in rejected.iterrows():
+                rows.append(
+                    {
+                        "record_id": record.record_id,
+                        "model": model_name,
+                        "type": row.get("type", ""),
+                        "source": row.get("source", ""),
+                        "pattern": row.get("pattern", ""),
+                        "ai_accept_proba": float(row.get("ai_accept_proba", np.nan)),
+                        "reason": "below_ai_threshold",
+                        "removed": 1,
+                    }
+                )
+    if not rows:
+        return pd.DataFrame(
+            columns=["record_id", "model", "type", "source", "pattern", "ai_accept_proba", "reason", "removed"]
+        )
+    return pd.DataFrame(rows)
+
+
+def predict_reranked_candidates(
+    record,
+    pipeline,
+    reranker_model,
+    threshold=0.50,
+    candidate_policy="safe",
+    policy_config=None,
+):
+    from pasm_ai_reranker import build_episode_candidates, reranker_accept_mask
+
+    candidates = build_episode_candidates(record, pipeline)
+    if len(candidates) == 0:
+        return candidates
+    out = candidates.copy().reset_index(drop=True)
+    proba = reranker_model.predict_accept_proba(out)
+    out["ai_accept_proba"] = proba
+    keep = reranker_accept_mask(
+        out,
+        proba,
+        threshold=threshold,
+        candidate_policy=candidate_policy,
+        policy_config=policy_config,
+    )
+    out["ai_decision"] = np.where(keep, "accept", "reject")
+    out["ai_top_features"] = [reranker_model.top_feature_names(row) for row in out.to_dict("records")]
+    return out
+
+
 def diagnostic_rows_for_predictions(record, predicted, model_name, duration_s, iou_threshold=0.30):
     predicted = normalize_episode_types(predicted).reset_index(drop=True)
     truth = normalize_episode_types(record.truth_episodes).reset_index(drop=True)
@@ -564,6 +975,11 @@ def diagnostic_rows_for_predictions(record, predicted, model_name, duration_s, i
                 "confidence",
                 "mean_sqi",
                 "beats",
+                "source",
+                "pattern",
+                "ai_accept_proba",
+                "ai_decision",
+                "ai_top_features",
                 "best_iou",
                 "failure_stage",
                 "record_duration_s",
@@ -590,6 +1006,11 @@ def diagnostic_rows_for_predictions(record, predicted, model_name, duration_s, i
                 "confidence": float(pred.get("confidence", np.nan)),
                 "mean_sqi": float(pred.get("mean_sqi", np.nan)),
                 "beats": int(pred.get("beats", 0)) if pd.notna(pred.get("beats", np.nan)) else 0,
+                "source": pred.get("source", ""),
+                "pattern": pred.get("pattern", ""),
+                "ai_accept_proba": float(pred.get("ai_accept_proba", np.nan)),
+                "ai_decision": pred.get("ai_decision", ""),
+                "ai_top_features": pred.get("ai_top_features", ""),
                 "best_iou": float(best_iou),
                 "failure_stage": classify_prediction_failure(pred, best_iou, iou_threshold),
                 "record_duration_s": float(duration_s),
@@ -640,11 +1061,21 @@ def write_ml_validation_report(path, result):
     )
     guarded_rows = guarded_config_table(result["guarded_config"])
     holdout_predictions = result["holdout_predictions"]
+    reranker_threshold_rows = pd.DataFrame(
+        [
+            {"model": "pasm_ai_reranker_safe", "parameter": "accept_threshold", "value": result["reranker_safe_threshold"]},
+            {"model": "pasm_ai_reranker_v2", "parameter": "accept_threshold", "value": result["reranker_v2_threshold"]},
+        ]
+        + [
+            {"model": "pasm_ai_reranker_v2", "parameter": key, "value": value}
+            for key, value in sorted(result["reranker_v2_policy_config"].items())
+        ]
+    )
 
     lines = [
         "# PASM-Rhythm ML Validation",
         "",
-        "This report evaluates lightweight NumPy softmax decoders on PASM feature tables.",
+        "This report evaluates lightweight NumPy softmax decoders and a candidate-level PASM-AI episode reranker.",
         "It is a research checkpoint, not clinical validation.",
         "",
         f"Preset: `{result['preset']}`",
@@ -706,6 +1137,50 @@ def write_ml_validation_report(path, result):
         "",
         _df_to_markdown(guarded_rows),
         "",
+        "## PASM-AI Episode Reranker",
+        "",
+        "The reranker is a lightweight NumPy logistic model trained on candidate episodes labelled by episode IoU.",
+        "`safe` keeps relaxed ectopy diagnostic-only; `v2` uses pattern-aware relaxed rescue.",
+        "",
+        _df_to_markdown(reranker_threshold_rows),
+        "",
+        "Episode hard negatives:",
+        "",
+        _df_to_markdown(
+            pd.DataFrame(
+                [
+                    {
+                        "hard_negative_candidates": result["reranker_hard_negative_count"],
+                        "hard_negative_boost": result["reranker_hard_negative_boost"],
+                    }
+                ]
+            )
+        ),
+        "",
+        "Candidate labels:",
+        "",
+        _df_to_markdown(reranker_candidate_label_counts(result["reranker_train_df"], result["reranker_holdout_df"])),
+        "",
+        "Accepted candidates by source:",
+        "",
+        _df_to_markdown(reranker_source_summary(result["reranker_train_df"], result["reranker_holdout_df"])),
+        "",
+        "Uncovered truth episodes:",
+        "",
+        _df_to_markdown(reranker_uncovered_summary(result["reranker_train_uncovered"], result["reranker_holdout_uncovered"])),
+        "",
+        "Top coefficients:",
+        "",
+        _df_to_markdown(top_reranker_coefficients(result["reranker_v2_model"])),
+        "",
+        "AI rescued vs rejected:",
+        "",
+        _df_to_markdown(ai_rescue_reject_summary(result)),
+        "",
+        "MITDB leave-one-record-out reranker v2:",
+        "",
+        _df_to_markdown(result["reranker_loro"]),
+        "",
         "## Train Summary",
         "",
         _df_to_markdown(result["train_summary"]),
@@ -734,6 +1209,10 @@ def write_ml_validation_report(path, result):
         "",
         _df_to_markdown(fp_removed_by_guard_reason(result["guard_removed"])),
         "",
+        "## FP Removed By PASM-AI",
+        "",
+        _df_to_markdown(fp_removed_by_reranker(result["reranker_removed"])),
+        "",
         "## Top Holdout False-Positive Episodes",
         "",
         _df_to_markdown(top_false_positive_episodes(holdout_predictions)),
@@ -744,6 +1223,8 @@ def write_ml_validation_report(path, result):
         "- `pasm_ml_decoder` is the first learned PASM scorer: softmax regression on PASM feature tables.",
         "- `pasm_ml_decoder_guarded` adds normal bias and conservative episode filters to reduce false positives.",
         "- `pasm_ml_decoder_fpaware` retrains with capped class weights and hard-negative normal beats from train false positives.",
+        "- `pasm_ai_reranker_safe` is the conservative candidate-level explainable AI layer.",
+        "- `pasm_ai_reranker_v2` adds pattern-aware relaxed ectopy rescue with episode-level hard negatives.",
         "- If learned variants underperform the baseline, keep them as experimental scaffolds and expand patient-wise data before moving to TCN/Transformer.",
         "",
     ]
@@ -761,6 +1242,102 @@ def guarded_config_table(config):
     ]
     for state, beats in sorted(config.get("min_beats_by_state", {}).items()):
         rows.append({"parameter": f"min_beats_{state}", "value": beats})
+    return pd.DataFrame(rows)
+
+
+def reranker_candidate_label_counts(train_df, holdout_df):
+    frames = []
+    for split, frame in [("train", train_df), ("holdout", holdout_df)]:
+        if frame is None or len(frame) == 0:
+            continue
+        tmp = frame.copy()
+        tmp["split"] = split
+        frames.append(tmp)
+    if not frames:
+        return pd.DataFrame(columns=["split", "accepted", "candidates"])
+    df = pd.concat(frames, ignore_index=True)
+    return (
+        df.groupby(["split", "accepted"])
+        .size()
+        .reset_index(name="candidates")
+        .sort_values(["split", "accepted"])
+        .reset_index(drop=True)
+    )
+
+
+def reranker_source_summary(train_df, holdout_df):
+    frames = []
+    for split, frame in [("train", train_df), ("holdout", holdout_df)]:
+        if frame is None or len(frame) == 0:
+            continue
+        tmp = frame.copy()
+        tmp["split"] = split
+        frames.append(tmp)
+    if not frames:
+        return pd.DataFrame(columns=["split", "source", "pattern", "accepted", "candidates"])
+    df = pd.concat(frames, ignore_index=True)
+    return (
+        df.groupby(["split", "source", "pattern", "accepted"])
+        .size()
+        .reset_index(name="candidates")
+        .sort_values(["split", "source", "pattern", "accepted"])
+        .reset_index(drop=True)
+    )
+
+
+def reranker_uncovered_summary(train_uncovered, holdout_uncovered):
+    frames = []
+    for split, frame in [("train", train_uncovered), ("holdout", holdout_uncovered)]:
+        if frame is None or len(frame) == 0:
+            continue
+        tmp = frame.copy()
+        tmp["split"] = split
+        frames.append(tmp)
+    if not frames:
+        return pd.DataFrame(columns=["split", "type", "uncovered_truth"])
+    df = pd.concat(frames, ignore_index=True)
+    return (
+        df.groupby(["split", "type"])
+        .size()
+        .reset_index(name="uncovered_truth")
+        .sort_values(["split", "type"])
+        .reset_index(drop=True)
+    )
+
+
+def top_reranker_coefficients(model, n=12):
+    if model is None:
+        return pd.DataFrame(columns=["feature", "coefficient", "abs_coefficient"])
+    return model.coefficients().head(n).reset_index(drop=True)
+
+
+def ai_rescue_reject_summary(result):
+    predictions = result.get("holdout_predictions", pd.DataFrame())
+    removed = result.get("reranker_removed", pd.DataFrame())
+    uncovered = result.get("reranker_holdout_uncovered", pd.DataFrame())
+    rows = []
+    if predictions is not None and len(predictions):
+        baseline_tp = predictions[(predictions["model"] == "pasm_physionet") & (predictions["status"] == "TP")]
+        v2_relaxed_tp = predictions[
+            (predictions["model"] == "pasm_ai_reranker_v2")
+            & (predictions["status"] == "TP")
+            & (predictions.get("source", "") == "relaxed_ectopy")
+        ]
+        rows.append({"metric": "baseline_tp", "count": int(len(baseline_tp))})
+        rows.append({"metric": "relaxed_tp_rescued", "count": int(len(v2_relaxed_tp))})
+    else:
+        rows.extend(
+            [
+                {"metric": "baseline_tp", "count": 0},
+                {"metric": "relaxed_tp_rescued", "count": 0},
+            ]
+        )
+    if removed is not None and len(removed):
+        rejected = removed[(removed["model"] == "pasm_ai_reranker_v2") & (removed["source"] == "relaxed_ectopy")]
+        rows.append({"metric": "relaxed_candidates_rejected", "count": int(rejected["removed"].sum())})
+    else:
+        rows.append({"metric": "relaxed_candidates_rejected", "count": 0})
+    rows.append({"metric": "uncovered_truth", "count": int(len(uncovered)) if uncovered is not None else 0})
     return pd.DataFrame(rows)
 
 
@@ -810,6 +1387,18 @@ def fp_removed_by_guard_reason(removed):
         .sum()
         .reset_index()
         .sort_values(["model", "removed", "type", "reason"], ascending=[True, False, True, True])
+        .reset_index(drop=True)
+    )
+
+
+def fp_removed_by_reranker(removed):
+    if removed is None or len(removed) == 0:
+        return pd.DataFrame(columns=["model", "type", "source", "pattern", "reason", "removed"])
+    return (
+        removed.groupby(["model", "type", "source", "pattern", "reason"])["removed"]
+        .sum()
+        .reset_index()
+        .sort_values(["model", "removed", "type", "source"], ascending=[True, False, True, True])
         .reset_index(drop=True)
     )
 

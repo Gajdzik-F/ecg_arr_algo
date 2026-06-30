@@ -5,6 +5,7 @@ import pandas as pd
 
 from pasm_physionet import (
     beat_labels_to_episodes,
+    detect_ectopy_candidates,
     detect_fast_irregular_af,
     detect_short_coupled_ectopy,
     filter_ectopy_candidate_flood,
@@ -16,6 +17,7 @@ from pasm_physionet import (
     postprocess_physionet_episodes,
     rhythm_aux_to_episodes,
 )
+from pasm_rhythm import PatientMemory
 
 
 class PASMPhysioNetTest(unittest.TestCase):
@@ -146,6 +148,64 @@ class PASMPhysioNetTest(unittest.TestCase):
         episodes = detect_short_coupled_ectopy(features, short_rr_s=0.55, max_following_rr_s=1.05)
 
         self.assertEqual(len(episodes), 0)
+
+    def test_premature_plus_pause_ectopy_candidate(self):
+        features = pd.DataFrame(
+            {
+                "time_s": [0.0, 0.8, 1.25, 2.35, 3.15],
+                "rr_prev": [np.nan, 0.8, 0.45, 1.10, 0.80],
+                "rr_next": [0.8, 0.45, 1.10, 0.80, np.nan],
+                "post_pause_ratio": [np.nan, 0.56, 1.38, 1.0, np.nan],
+                "sqi": np.ones(5),
+            }
+        )
+
+        candidates = detect_ectopy_candidates(features)
+
+        self.assertIn("premature_plus_pause", set(candidates["pattern"]))
+
+    def test_morphology_supported_dense_cluster_candidate(self):
+        features = pd.DataFrame(
+            {
+                "time_s": np.arange(8, dtype=float),
+                "rr_prev": [np.nan, 0.8, 0.46, 0.48, 0.82, 0.47, 0.49, 0.8],
+                "rr_next": [0.8, 0.46, 0.48, 0.82, 0.47, 0.49, 0.8, np.nan],
+                "sqi": np.ones(8),
+            }
+        )
+        beats = np.zeros((8, 4), dtype=float)
+        beats[2:7] = 1.0
+        memory = PatientMemory(
+            morphology_prototype=np.zeros(4),
+            morphology_scale=1.0,
+            rr_median=0.8,
+            rr_mad=0.05,
+            rmssd_median=0.02,
+            rmssd_mad=0.02,
+            sqi_median=1.0,
+            n_baseline_beats=4,
+        )
+
+        candidates = detect_ectopy_candidates(features, beats=beats, patient_memory=memory)
+
+        self.assertIn("morphology_cluster", set(candidates["pattern"]))
+
+    def test_rr_irregular_burst_candidate_bridges_fragmented_run(self):
+        features = pd.DataFrame(
+            {
+                "time_s": np.arange(12, dtype=float) * 0.5,
+                "rr_prev": [np.nan, 0.78, 0.74, 0.52, 0.36, 0.65, 0.74, 0.41, 0.29, 0.41, 0.39, 0.98],
+                "rr_next": [0.78, 0.74, 0.52, 0.36, 0.65, 0.74, 0.41, 0.29, 0.41, 0.39, 0.98, np.nan],
+                "local_cv": [0.05, 0.10, 0.18, 0.24, 0.30, 0.34, 0.34, 0.35, 0.37, 0.36, 0.30, 0.10],
+                "local_rmssd": [0.03, 0.04, 0.10, 0.16, 0.19, 0.20, 0.21, 0.23, 0.22, 0.21, 0.18, 0.05],
+                "post_pause_ratio": [np.nan, 1.0, 0.9, 0.6, 1.1, 1.9, 0.7, 0.8, 1.1, 1.0, 2.4, np.nan],
+                "sqi": np.ones(12),
+            }
+        )
+
+        candidates = detect_ectopy_candidates(features)
+
+        self.assertIn("rr_irregular_burst", set(candidates["pattern"]))
 
     def test_ectopy_flood_filter_removes_weak_isolated_candidates(self):
         episodes = pd.DataFrame(
